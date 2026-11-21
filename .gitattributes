@@ -1,0 +1,16 @@
+# Auto detect text files and perform line ending normalization
+* text=auto
+
+# Prisma generated files (marked as generated for GitHub/git diffs)
+backend/src/prisma/contract.json linguist-generated
+backend/src/prisma/contract.d.ts linguist-generated
+backend/src/prisma/ops.json linguist-generated
+backend/src/prisma/migration.json linguist-generated
+backend/migrations/snapshots/**/contract.json linguist-generated
+backend/migrations/snapshots/**/contract.d.ts linguist-generated
+**/prisma/contract.json linguist-generated
+**/prisma/contract.d.ts linguist-generated
+**/prisma/ops.json linguist-generated
+**/prisma/migration.json linguist-generated
+**/migrations/snapshots/**/contract.json linguist-generated
+**/migrations/snapshots/**/contract.d.ts linguist-generated
