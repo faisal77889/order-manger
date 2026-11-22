@@ -1,12 +1,22 @@
-import express from "express"
+import express from "express";
+import cors from "cors";
 import authRouter from "./routes/auth.router.js";
 import importRouter from "./routes/import.router.js";
 import ordersRouter from "./routes/orders.router.js";
 import customersRouter from "./routes/customers.router.js";
 import reportsRouter from "./routes/reports.router.js";
+import exportRouter from "./routes/export.router.js";
+import auditRouter from "./routes/audit.router.js";
 
 
 const app = express();
+
+app.use(
+    cors({
+        origin: "http://localhost:5173",
+        credentials: true,
+    })
+);
 app.use(express.json());
 
 
@@ -15,6 +25,8 @@ app.use("/import", importRouter);
 app.use("/orders", ordersRouter);
 app.use("/customers", customersRouter);
 app.use("/reports", reportsRouter);
+app.use("/export", exportRouter);
+app.use("/audit-logs", auditRouter);
 
 
 

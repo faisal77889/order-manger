@@ -1,12 +1,21 @@
 import { Router } from "express";
-import { query, param, validationResult } from "express-validator";
+import { query, param, body, validationResult } from "express-validator";
 import { db } from "../prisma/db.ts";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireAdmin } from "../middleware/auth.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = Router();
 
 const ALLOWED_STATUSES = ["pending", "paid", "shipped", "cancelled"];
 const ALLOWED_SORT_DIRS = ["asc", "desc"];
+
+
+const ALLOWED_STATUS_TRANSITIONS = {
+    pending: ["paid", "cancelled"],
+    paid: ["shipped", "cancelled"],
+    shipped: ["cancelled"],
+    cancelled: [],
+};
 
 
 function handleValidationErrors(req, res, next) {
@@ -91,6 +100,65 @@ const getOrderByIdValidators = [
         .isInt({ min: 1 })
         .withMessage("Invalid order 'id'. Must be a positive integer.")
         .toInt(),
+    handleValidationErrors,
+];
+
+const createOrderValidators = [
+    body("customer_id")
+        .exists({ values: "null" })
+        .withMessage("'customer_id' is required.")
+        .isInt({ min: 1 })
+        .withMessage("Invalid 'customer_id'. Must be a positive integer.")
+        .toInt(),
+    body("status")
+        .optional({ values: "falsy" })
+        .trim()
+        .toLowerCase()
+        .isIn(ALLOWED_STATUSES)
+        .withMessage(`Invalid 'status'. Allowed values: ${ALLOWED_STATUSES.join(", ")}.`),
+    body("order_date")
+        .optional({ values: "falsy" })
+        .trim()
+        .custom((val) => !isNaN(new Date(val).getTime()))
+        .withMessage("Invalid 'order_date'. Must be a valid date format."),
+    body("items")
+        .isArray({ min: 1 })
+        .withMessage("'items' must be a non-empty array of order items."),
+    body("items.*.product_id")
+        .exists({ values: "null" })
+        .withMessage("Each item must have a 'product_id'.")
+        .isInt({ min: 1 })
+        .withMessage("Each item 'product_id' must be a positive integer.")
+        .toInt(),
+    body("items.*.quantity")
+        .exists({ values: "null" })
+        .withMessage("Each item must have a 'quantity'.")
+        .isInt({ min: 1 })
+        .withMessage("Each item 'quantity' must be a positive integer (> 0).")
+        .toInt(),
+    body("items.*.unit_price")
+        .optional({ values: "null" })
+        .isFloat({ gt: 0 })
+        .withMessage("Each item 'unit_price' must be a positive number (> 0)."),
+    body("items.*.price")
+        .optional({ values: "null" })
+        .isFloat({ gt: 0 })
+        .withMessage("Each item 'price' must be a positive number (> 0)."),
+    handleValidationErrors,
+];
+
+const updateOrderStatusValidators = [
+    param("id")
+        .isInt({ min: 1 })
+        .withMessage("Invalid order 'id'. Must be a positive integer.")
+        .toInt(),
+    body("status")
+        .exists({ values: "falsy" })
+        .withMessage("'status' is required.")
+        .trim()
+        .toLowerCase()
+        .isIn(ALLOWED_STATUSES)
+        .withMessage(`Invalid 'status'. Allowed values: ${ALLOWED_STATUSES.join(", ")}.`),
     handleValidationErrors,
 ];
 
@@ -287,6 +355,243 @@ router.get("/:id", requireAuth, getOrderByIdValidators, async (req, res) => {
     } catch (err) {
         console.error(`Error fetching order ${orderId}:`, err);
         return res.status(500).json({ error: "Failed to fetch order details." });
+    }
+});
+
+
+router.post("/", requireAuth, requireAdmin, createOrderValidators, async (req, res) => {
+    const customerId = Number(req.body.customer_id);
+    const status = req.body.status ? String(req.body.status).trim().toLowerCase() : "pending";
+    const orderDate = req.body.order_date ? new Date(req.body.order_date) : new Date();
+    const rawItems = req.body.items;
+
+    try {
+
+        const customer = await db.orm.public.Customer.where({ id: customerId })
+            .select("id", "name", "email")
+            .first();
+
+        if (!customer) {
+            return res.status(404).json({
+                error: `Customer with id ${customerId} does not exist. Please create a customer first before placing an order.`,
+            });
+        }
+
+
+        const productIds = [...new Set(rawItems.map((i) => Number(i.product_id)))];
+        const products = await db.orm.public.Product.where((p) => p.id.in(productIds))
+            .select("id", "name", "price")
+            .all();
+
+        const productMap = new Map(products.map((p) => [p.id, p]));
+        for (const pid of productIds) {
+            if (!productMap.has(pid)) {
+                return res.status(400).json({
+                    error: `Product with id ${pid} does not exist.`,
+                });
+            }
+        }
+
+
+        let totalAmount = 0;
+        const preparedItems = [];
+
+        for (const item of rawItems) {
+            const productId = Number(item.product_id);
+            const quantity = Number(item.quantity);
+            const product = productMap.get(productId);
+
+            const rawPrice =
+                item.unit_price !== undefined
+                    ? Number(item.unit_price)
+                    : item.price !== undefined
+                        ? Number(item.price)
+                        : Number(product.price);
+
+            const unitPrice = Math.round(rawPrice);
+
+            if (!Number.isInteger(quantity) || quantity <= 0) {
+                return res.status(400).json({
+                    error: "Quantity must be a positive integer (> 0).",
+                });
+            }
+
+            if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+                return res.status(400).json({
+                    error: `Unit price for product ${productId} must be positive (> 0).`,
+                });
+            }
+
+            totalAmount += quantity * unitPrice;
+            preparedItems.push({
+                product_id: productId,
+                quantity,
+                unit_price: unitPrice,
+            });
+        }
+
+
+        const result = await db.transaction(async (tx) => {
+            const newOrder = await tx.orm.public.Order.create({
+                customer_id: customerId,
+                status,
+                order_date: orderDate,
+                total_amount: totalAmount,
+            });
+
+            const orderItemsPayload = preparedItems.map((item) => ({
+                order_id: newOrder.id,
+                product_id: item.product_id,
+                quantity: item.quantity,
+                unit_price: item.unit_price,
+            }));
+
+            const createdItems = await tx.orm.public.OrderItem.createAll(orderItemsPayload);
+
+            return {
+                order: newOrder,
+                items: createdItems,
+            };
+        });
+
+        await logAudit({
+            user_id: req.user?.id ?? null,
+            actor_email: req.user?.email ?? null,
+            action: "order_created",
+            entity: "orders",
+            entity_id: result.order.id,
+            details: `Order #${result.order.id} created for customer #${customerId} (${preparedItems.length} items, total_amount: ${totalAmount})`,
+        });
+
+        return res.status(201).json({
+            message: "Order created successfully.",
+            id: result.order.id,
+            customer_id: result.order.customer_id,
+            customer_name: customer.name,
+            status: result.order.status,
+            order_date: result.order.order_date,
+            total_amount: result.order.total_amount,
+            items: result.items.map((item) => ({
+                id: item.id,
+                order_id: item.order_id,
+                product_id: item.product_id,
+                product_name: productMap.get(item.product_id)?.name ?? null,
+                quantity: item.quantity,
+                unit_price: item.unit_price,
+                line_total: item.quantity * item.unit_price,
+            })),
+        });
+    } catch (err) {
+        console.error("Error creating order:", err);
+        return res.status(500).json({ error: "Failed to create order." });
+    }
+});
+
+
+router.patch(
+    "/:id/status",
+    requireAuth,
+    requireAdmin,
+    updateOrderStatusValidators,
+    async (req, res) => {
+        const orderId = Number(req.params.id);
+        const newStatus = String(req.body.status).trim().toLowerCase();
+
+        try {
+            const existingOrder = await db.orm.public.Order.where({ id: orderId })
+                .select("id", "customer_id", "status", "order_date", "total_amount")
+                .first();
+
+            if (!existingOrder) {
+                return res.status(404).json({ error: "Order not found." });
+            }
+
+            const currentStatus = existingOrder.status;
+
+            if (currentStatus === "cancelled") {
+                return res.status(400).json({
+                    error: "Cannot change status of a cancelled order.",
+                });
+            }
+
+            if (currentStatus === newStatus) {
+                return res.status(400).json({
+                    error: `Order status is already '${currentStatus}'.`,
+                });
+            }
+
+            const allowedNextStatuses = ALLOWED_STATUS_TRANSITIONS[currentStatus] || [];
+            if (!allowedNextStatuses.includes(newStatus)) {
+                return res.status(400).json({
+                    error: `Invalid status transition from '${currentStatus}' to '${newStatus}'. Allowed transitions from '${currentStatus}': ${allowedNextStatuses.length > 0 ? allowedNextStatuses.join(", ") : "none"
+                        }.`,
+                });
+            }
+
+            const updatedOrder = await db.orm.public.Order.where({ id: orderId }).update({
+                status: newStatus,
+            });
+
+            await logAudit({
+                user_id: req.user?.id ?? null,
+                actor_email: req.user?.email ?? null,
+                action: "order_status_changed",
+                entity: "orders",
+                entity_id: orderId,
+                details: `Order #${orderId} status changed from '${currentStatus}' to '${newStatus}'`,
+            });
+
+            return res.status(200).json({
+                message: `Order status updated from '${currentStatus}' to '${newStatus}'.`,
+                order: updatedOrder,
+            });
+        } catch (err) {
+            console.error(`Error updating status for order ${orderId}:`, err);
+            return res.status(500).json({ error: "Failed to update order status." });
+        }
+    }
+);
+
+
+router.delete("/:id", requireAuth, requireAdmin, getOrderByIdValidators, async (req, res) => {
+    const orderId = Number(req.params.id);
+
+    try {
+        const existingOrder = await db.orm.public.Order.where({ id: orderId })
+            .select("id", "customer_id", "status", "total_amount")
+            .first();
+
+        if (!existingOrder) {
+            return res.status(404).json({ error: "Order not found." });
+        }
+
+        const deletedItemsCount = await db.transaction(async (tx) => {
+            const count = await tx.orm.public.OrderItem.where({
+                order_id: orderId,
+            }).deleteAndCount();
+
+            await tx.orm.public.Order.where({ id: orderId }).delete();
+
+            return count;
+        });
+
+        await logAudit({
+            user_id: req.user?.id ?? null,
+            actor_email: req.user?.email ?? null,
+            action: "order_deleted",
+            entity: "orders",
+            entity_id: orderId,
+            details: `Order #${orderId} deleted along with ${deletedItemsCount} order items`,
+        });
+
+        return res.status(200).json({
+            message: "Order and its items deleted successfully.",
+            deleted_order_id: orderId,
+            deleted_items_count: deletedItemsCount,
+        });
+    } catch (err) {
+        console.error(`Error deleting order ${orderId}:`, err);
+        return res.status(500).json({ error: "Failed to delete order." });
     }
 });
 

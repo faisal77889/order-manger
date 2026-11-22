@@ -9,13 +9,12 @@ import {
     UPLOAD_DIR,
     ERROR_CSV_DIR,
 } from "../services/import.service.js";
+import { requireAuth, requireAdmin } from "../middleware/auth.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = Router();
 
-// 1. Upload Safety (Section 4.7)
-// - Accept only .csv (check extension and content type)
-// - Max file size 100 MB (reject bigger files with 413)
-// - Save with generated random name (never use uploaded file name as a path)
+
 const ALLOWED_MIME_TYPES = [
     "text/csv",
     "application/csv",
@@ -68,8 +67,7 @@ const uploadCsvMiddleware = (req, res, next) => {
     });
 };
 
-// POST /import/:table - Enqueue bulk import job in BullMQ (Section 4.1)
-router.post("/:table", uploadCsvMiddleware, async (req, res) => {
+router.post("/:table", requireAuth, requireAdmin, uploadCsvMiddleware, async (req, res) => {
     const { table } = req.params;
 
     if (!ALLOWED_TABLES.includes(table)) {
@@ -96,6 +94,15 @@ router.post("/:table", uploadCsvMiddleware, async (req, res) => {
             }
         );
 
+        await logAudit({
+            user_id: req.user?.id ?? null,
+            actor_email: req.user?.email ?? null,
+            action: "import_started",
+            entity: table,
+            entity_id: jobId,
+            details: `Bulk CSV import started for table '${table}' (job_id: ${jobId})`,
+        });
+
         return res.status(202).json({
             message: `Import job queued for ${table}`,
             job_id: jobId,
@@ -108,7 +115,7 @@ router.post("/:table", uploadCsvMiddleware, async (req, res) => {
     }
 });
 
-// GET /import/jobs/:job_id - Check job status and progress in BullMQ (Section 4.1)
+
 router.get("/jobs/:job_id", async (req, res) => {
     try {
         const bullJob = await importQueue.getJob(req.params.job_id);
@@ -125,15 +132,15 @@ router.get("/jobs/:job_id", async (req, res) => {
             state === "completed" && bullJob.returnvalue
                 ? bullJob.returnvalue
                 : typeof bullJob.progress === "object" && bullJob.progress !== null
-                ? bullJob.progress
-                : {
-                      total_rows: 0,
-                      inserted: 0,
-                      updated_or_skipped: 0,
-                      failed: 0,
-                      time_taken_seconds: 0,
-                      error_csv_url: null,
-                  };
+                    ? bullJob.progress
+                    : {
+                        total_rows: 0,
+                        inserted: 0,
+                        updated_or_skipped: 0,
+                        failed: 0,
+                        time_taken_seconds: 0,
+                        error_csv_url: null,
+                    };
 
         return res.status(200).json({
             job_id: bullJob.id,
@@ -148,7 +155,7 @@ router.get("/jobs/:job_id", async (req, res) => {
     }
 });
 
-// GET /import/jobs/:job_id/errors - Download bad rows error CSV (Section 4.1)
+
 router.get("/jobs/:job_id/errors", async (req, res) => {
     try {
         const bullJob = await importQueue.getJob(req.params.job_id);

@@ -2,6 +2,7 @@ import { Router } from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { db } from "../prisma/db.ts";
+import { logAudit } from "../services/audit.service.js";
 
 const router = Router();
 
@@ -16,8 +17,30 @@ router.post("/login", async (req, res) => {
     try {
         const user = await db.orm.public.AdminUser.where({ email }).first();
         if (!user) {
+            await logAudit({
+                user_id: null,
+                actor_email: email,
+                action: "login_failed",
+                entity: "admin_users",
+                entity_id: null,
+                details: `Failed login attempt for unknown email '${email}'`,
+            });
             return res.status(401).json({
                 message: "Invalid email or password"
+            });
+        }
+
+        if (user.is_active === false) {
+            await logAudit({
+                user_id: user.id,
+                actor_email: user.email,
+                action: "login_failed",
+                entity: "admin_users",
+                entity_id: user.id,
+                details: `Failed login attempt: account '${user.email}' is disabled`,
+            });
+            return res.status(401).json({
+                message: "User account has been disabled"
             });
         }
 
@@ -33,6 +56,14 @@ router.post("/login", async (req, res) => {
         }
 
         if (!isPasswordValid) {
+            await logAudit({
+                user_id: user.id,
+                actor_email: user.email,
+                action: "login_failed",
+                entity: "admin_users",
+                entity_id: user.id,
+                details: `Failed login attempt: invalid password for '${user.email}'`,
+            });
             return res.status(401).json({
                 message: "Invalid email or password"
             });
@@ -43,6 +74,15 @@ router.post("/login", async (req, res) => {
             process.env.JWT_SECRET || "default_jwt_secret_key",
             { expiresIn: "1d" }
         );
+
+        await logAudit({
+            user_id: user.id,
+            actor_email: user.email,
+            action: "login_success",
+            entity: "admin_users",
+            entity_id: user.id,
+            details: `User '${user.email}' (${user.role}) logged in successfully`,
+        });
 
         return res.status(200).json({
             message: "Login successful",
