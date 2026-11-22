@@ -2,7 +2,7 @@
 
 A full-stack Order Management System built with **Express.js**, **PostgreSQL (Prisma ORM)**, **Redis + BullMQ** on the backend, and **React + TypeScript + Tailwind CSS + Vite** on the frontend.
 
-> **Note:** Active development is ongoing — some features and UI enhancements are still being worked on.
+> **Note:** I am still working on some features and performance optimizations for this project.
 
 ---
 
@@ -92,7 +92,4 @@ Make sure you have the following installed and running locally:
 
 ## Work in Progress
 
-We are still actively working on several features and improvements, including:
-- Creating new orders and updating order statuses directly from the frontend UI
-- Enhanced customer directory browsing and search
-- Role-based UI controls and additional dashboard refinements
+I am still working on some features, such as database indexing, analyzing the performance differences in SQL query outputs (`EXPLAIN ANALYZE` before and after indexing), and refining the reports and analytics further.
