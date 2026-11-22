@@ -160,7 +160,6 @@ const handleBulkBundleImport = async (req, res) => {
     }
 };
 
-// POST /import/bulk (or /import/bundle or /import) — requires all 5 CSV files at once
 router.post("/bulk", requireAuth, requireAdmin, uploadBundleMiddleware, handleBulkBundleImport);
 router.post("/bundle", requireAuth, requireAdmin, uploadBundleMiddleware, handleBulkBundleImport);
 router.post("/", requireAuth, requireAdmin, uploadBundleMiddleware, handleBulkBundleImport);

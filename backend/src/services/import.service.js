@@ -205,15 +205,11 @@ export function validateAndTransformRow(table, row) {
     }
 }
 
-/**
- * Inserts a batch of rows for the 5-file bundle import WITHOUT passing the CSV's `id` to PostgreSQL,
- * allowing PostgreSQL to generate collision-free autoincrement IDs and storing (csvId -> dbId) in idMap.
- */
+
 async function processBundleBatch(table, model, items, idMap, errorStream, state, tableMetrics) {
     if (items.length === 0) return;
 
-    // For categories (unique `name`) and customers (unique `email`), handle existing duplicates gracefully
-    // and still map their csvId -> existing dbId so child products/orders in this bundle remain intact!
+
     if (table === "categories" || table === "customers") {
         const uniqueField = table === "categories" ? "name" : "email";
         const seenInBatch = new Map();
@@ -312,7 +308,7 @@ async function processBundleBatch(table, model, items, idMap, errorStream, state
         return;
     }
 
-    // For products, orders, and order_items: bulk insert without `id` and zip returned rows in order
+
     try {
         const payload = items.map((i) => i.insertData);
         const streamResult = await model.createAll(payload);
@@ -354,15 +350,7 @@ async function processBundleBatch(table, model, items, idMap, errorStream, state
     }
 }
 
-/**
- * Processes a full 5-file bundle in topological order using in-memory ID maps (csv_id -> db_id):
- * 1. categories.csv -> categoryMap
- * 2. products.csv   -> productMap (validating & remapping category_id)
- * 3. customers.csv  -> customerMap
- * 4. Pre-scan order_items.csv to compute expected total_amount = sum(quantity * unit_price) per CSV order_id
- * 5. orders.csv     -> orderMap (validating & remapping customer_id AND verifying total_amount === sum(items))
- * 6. order_items.csv -> (validating & remapping order_id and product_id)
- */
+
 async function processBundleImport(bullJob) {
     const { files } = bullJob.data;
     const startTime = performance.now();
