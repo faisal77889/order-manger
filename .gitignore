@@ -50,6 +50,10 @@ coverage/
 .eslintcache
 .stylelintcache
 
+# Data & CSV files
+*.csv
+data/
+
 # Temporary & Upload files
 tmp/
 temp/

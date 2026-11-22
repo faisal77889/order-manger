@@ -1,13 +1,7 @@
 import jwt from "jsonwebtoken";
 import { db } from "../prisma/db.ts";
 
-/**
- * Middleware: requireAuth
- * Verifies the JWT Bearer token and checks if the user is active in the database.
- * Requirement 4.7 & 4.9:
- * - Missing, bad, or expired token returns 401.
- * - Checks is_active on every request; disabled users return 401.
- */
+
 export async function requireAuth(req, res, next) {
     const authHeader = req.headers.authorization || req.headers.Authorization;
 
@@ -62,12 +56,7 @@ export async function requireAuth(req, res, next) {
     }
 }
 
-/**
- * Middleware: requireAdmin
- * Enforces admin-only access (e.g. for user management, imports, mutations).
- * Requirement 4.7:
- * - A viewer calling an admin write endpoint gets 403.
- */
+
 export function requireAdmin(req, res, next) {
     if (!req.user) {
         return res.status(401).json({
@@ -84,10 +73,7 @@ export function requireAdmin(req, res, next) {
     next();
 }
 
-/**
- * Middleware: requireRole
- * Factory for checking any combination of allowed roles (e.g. requireRole('admin', 'viewer')).
- */
+
 export function requireRole(...allowedRoles) {
     return (req, res, next) => {
         if (!req.user) {
