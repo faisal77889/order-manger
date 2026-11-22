@@ -1,9 +1,106 @@
 // use prisma-8
+// enum Status {
+//   pending
+//   paid
+//   shipped
+//   cancelled
+// }
+
+// enum Role {
+//   admin
+//   viewer
+// }
+
+// model Customer {
+//   id        Int                @id @default(autoincrement())
+//   email     String             @unique
+//   name      String
+//   city      String
+//   createdAt DateTime           @default(now()) @onCreate(now())
+//   updatedAt temporal.UpdatedAt
+
+//   orders    Order[]
+
+//   @@map("customers")
+// }
+
+// model Category {
+//   id        Int                @id @default(autoincrement())
+//   name      String             @unique
+//   products  Product[]
+//   createdAt DateTime           @default(now()) @onCreate(now())
+//   updatedAt temporal.UpdatedAt
+
+//   @@map("categories")
+// }
+
+// model Product {
+//   id          Int                @id @default(autoincrement())
+//   name        String
+//   price       Int
+//   category_id Int
+//   createdAt   DateTime           @default(now()) @onCreate(now())
+//   updatedAt   temporal.UpdatedAt
+//   category    Category           @relation(fields: [category_id], references: [id])
+
+//   @@map("products")
+// }
+
+// model Order {
+//   id           Int         @id @default(autoincrement())
+//   customer_id  Int
+//   total_amount Int
+//   status       Status      @default(pending)
+//   order_date   DateTime
+//   customer     Customer    @relation(fields: [customer_id], references: [id])
+//   order_items  OrderItem[]
+
+//   @@map("orders")
+// }
+
+// model OrderItem {
+//   id         Int   @id @default(autoincrement())
+//   order_id   Int
+//   product_id Int
+//   unit_price Int
+//   quantity   Int
+
+//   order      Order @relation(fields: [order_id], references: [id])
+//   product    Product @relation(fields: [product_id],references: [id])
+
+//   @@check(expression: sql`quantity > 0`, name: "quantity_positive")
+//   @@check(expression: sql`unit_price > 0`,name: "unit_price_positive")
+//   @@map("order_items")
+// }
+
+
+// model AdminUser {
+//   id        Int                @id @default(autoincrement())
+//   email     String             @unique
+//   name      String
+//   password  String
+//   role      Role               @default(viewer)
+//   is_active Bool               @default(true)
+//   createdAt DateTime           @default(now()) @onCreate(now())
+//   updatedAt temporal.UpdatedAt
+
+//   @@map("admin_users")
+// }'
+
+
+
+// use prisma-8
+
 enum Status {
   pending
   paid
   shipped
   cancelled
+}
+
+enum Role {
+  admin
+  viewer
 }
 
 model Customer {
@@ -36,8 +133,11 @@ model Product {
   category_id Int
   createdAt   DateTime           @default(now()) @onCreate(now())
   updatedAt   temporal.UpdatedAt
-  category    Category           @relation(fields: [category_id], references: [id])
 
+  category    Category           @relation(fields: [category_id], references: [id])
+  order_items OrderItem[]
+
+  @@check(expression: sql`price >= 0`, name: "product_price_non_negative")
   @@map("products")
 }
 
@@ -47,23 +147,55 @@ model Order {
   total_amount Int
   status       Status      @default(pending)
   order_date   DateTime
+
   customer     Customer    @relation(fields: [customer_id], references: [id])
   order_items  OrderItem[]
 
+  @@check(expression: sql`total_amount >= 0`, name: "order_total_non_negative")
   @@map("orders")
 }
 
 model OrderItem {
-  id         Int   @id @default(autoincrement())
+  id         Int     @id @default(autoincrement())
   order_id   Int
   product_id Int
   unit_price Int
   quantity   Int
 
-  order      Order @relation(fields: [order_id], references: [id])
-  product    Product @relation(fields: [product_id],references: [id])
+  order      Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product    Product @relation(fields: [product_id], references: [id])
 
   @@check(expression: sql`quantity > 0`, name: "quantity_positive")
-  @@check(expression: sql`unit_price > 0`,name: "unit_price_positive")
+  @@check(expression: sql`unit_price >= 0`, name: "unit_price_positive")
   @@map("order_items")
+}
+
+model AdminUser {
+  id         Int                @id @default(autoincrement())
+  email      String             @unique
+  name       String
+  password   String
+  role       Role               @default(viewer)
+  is_active  Bool               @default(true)
+  createdAt  DateTime           @default(now()) @onCreate(now())
+  updatedAt  temporal.UpdatedAt
+
+  audit_logs AuditLog[]
+
+  @@map("admin_users")
+}
+
+model AuditLog {
+  id          Int        @id @default(autoincrement())
+  user_id     Int?
+  actor_email String?
+  action      String
+  entity      String?
+  entity_id   String?
+  details     String?
+  createdAt   DateTime   @default(now()) @onCreate(now())
+
+  user        AdminUser? @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  @@map("audit_logs")
 }
