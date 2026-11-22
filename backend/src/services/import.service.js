@@ -45,14 +45,28 @@ function writeCsvLine(stream, fields) {
     return Promise.resolve();
 }
 
-async function writeErrorRow(errorStream, rawRow, reason, state) {
+function closeWriteStream(stream) {
+    return new Promise((resolve) => {
+        stream.end(() => resolve());
+    });
+}
+
+async function writeErrorRow(errorStream, rawRow, reason, state, tableName = null) {
     if (!state.errorHeaderWritten) {
-        const headerCols = [...Object.keys(rawRow), "error_reason"];
+        const headerCols = tableName
+            ? ["table", "row_id", "details", "error_reason"]
+            : [...Object.keys(rawRow), "error_reason"];
         await writeCsvLine(errorStream, headerCols);
         state.errorHeaderWritten = true;
     }
-    const cols = [...Object.keys(rawRow).map((k) => rawRow[k] ?? ""), reason];
-    await writeCsvLine(errorStream, cols);
+    if (tableName) {
+        const rowId = rawRow.id ?? "";
+        const details = JSON.stringify(rawRow);
+        await writeCsvLine(errorStream, [tableName, rowId, details, reason]);
+    } else {
+        const cols = [...Object.keys(rawRow).map((k) => rawRow[k] ?? ""), reason];
+        await writeCsvLine(errorStream, cols);
+    }
 }
 
 function parseAmountToInt(raw) {
@@ -70,7 +84,7 @@ export function validateAndTransformRow(table, row) {
             if (row.id !== undefined && (!Number.isInteger(id) || id <= 0)) {
                 return { error: "Invalid id" };
             }
-            return { data: { ...(id ? { id } : {}), name } };
+            return { csvId: id, data: { ...(id ? { id } : {}), name } };
         }
 
         case "products": {
@@ -89,7 +103,7 @@ export function validateAndTransformRow(table, row) {
             if (row.id !== undefined && (!Number.isInteger(id) || id <= 0)) {
                 return { error: "Invalid id" };
             }
-            return { data: { ...(id ? { id } : {}), category_id, name, price } };
+            return { csvId: id, data: { ...(id ? { id } : {}), category_id, name, price } };
         }
 
         case "customers": {
@@ -115,7 +129,7 @@ export function validateAndTransformRow(table, row) {
             if (row.id !== undefined && (!Number.isInteger(id) || id <= 0)) {
                 return { error: "Invalid id" };
             }
-            return { data: { ...(id ? { id } : {}), name, email, city, createdAt } };
+            return { csvId: id, data: { ...(id ? { id } : {}), name, email, city, createdAt } };
         }
 
         case "orders": {
@@ -141,6 +155,7 @@ export function validateAndTransformRow(table, row) {
                 return { error: "Invalid id" };
             }
             return {
+                csvId: id,
                 data: {
                     ...(id ? { id } : {}),
                     customer_id,
@@ -174,6 +189,7 @@ export function validateAndTransformRow(table, row) {
                 return { error: "Invalid id" };
             }
             return {
+                csvId: id,
                 data: {
                     ...(id ? { id } : {}),
                     order_id,
@@ -186,6 +202,382 @@ export function validateAndTransformRow(table, row) {
 
         default:
             return { error: `Unsupported table: ${table}` };
+    }
+}
+
+/**
+ * Inserts a batch of rows for the 5-file bundle import WITHOUT passing the CSV's `id` to PostgreSQL,
+ * allowing PostgreSQL to generate collision-free autoincrement IDs and storing (csvId -> dbId) in idMap.
+ */
+async function processBundleBatch(table, model, items, idMap, errorStream, state, tableMetrics) {
+    if (items.length === 0) return;
+
+    // For categories (unique `name`) and customers (unique `email`), handle existing duplicates gracefully
+    // and still map their csvId -> existing dbId so child products/orders in this bundle remain intact!
+    if (table === "categories" || table === "customers") {
+        const uniqueField = table === "categories" ? "name" : "email";
+        const seenInBatch = new Map();
+        const dedupedItems = [];
+
+        for (const item of items) {
+            const keyVal = item.insertData[uniqueField];
+            if (seenInBatch.has(keyVal)) {
+                state.updated_or_skipped++;
+                tableMetrics.updated_or_skipped++;
+                await writeErrorRow(
+                    errorStream,
+                    item.rawRow,
+                    `Duplicate ${uniqueField} '${keyVal}' within uploaded CSV`,
+                    state,
+                    table
+                );
+                continue;
+            }
+            seenInBatch.set(keyVal, item);
+            dedupedItems.push(item);
+        }
+
+        if (dedupedItems.length === 0) return;
+
+        const keyValues = dedupedItems.map((i) => i.insertData[uniqueField]);
+        const existingRows = await model
+            .where((m) => m[uniqueField].in(keyValues))
+            .select("id", uniqueField)
+            .all();
+
+        const existingByKey = new Map(existingRows.map((r) => [r[uniqueField], r.id]));
+        const toInsert = [];
+
+        for (const item of dedupedItems) {
+            const keyVal = item.insertData[uniqueField];
+            if (existingByKey.has(keyVal)) {
+                const existingDbId = existingByKey.get(keyVal);
+                if (item.csvId !== undefined && idMap) {
+                    idMap.set(item.csvId, existingDbId);
+                }
+                state.updated_or_skipped++;
+                tableMetrics.updated_or_skipped++;
+                await writeErrorRow(
+                    errorStream,
+                    item.rawRow,
+                    `Existing ${table.slice(0, -1)} with ${uniqueField} '${keyVal}' mapped to DB id ${existingDbId} (skipped insert)`,
+                    state,
+                    table
+                );
+            } else {
+                toInsert.push(item);
+            }
+        }
+
+        if (toInsert.length === 0) return;
+
+        try {
+            const payload = toInsert.map((i) => i.insertData);
+            const streamResult = await model.createAll(payload);
+            const createdByKey = new Map();
+            for await (const created of streamResult) {
+                createdByKey.set(created[uniqueField], created.id);
+            }
+
+            for (const item of toInsert) {
+                const dbId = createdByKey.get(item.insertData[uniqueField]);
+                if (dbId !== undefined) {
+                    if (item.csvId !== undefined && idMap) {
+                        idMap.set(item.csvId, dbId);
+                    }
+                    state.inserted++;
+                    tableMetrics.inserted++;
+                } else {
+                    state.failed++;
+                    tableMetrics.failed++;
+                    await writeErrorRow(errorStream, item.rawRow, "Failed to insert row", state, table);
+                }
+            }
+        } catch (err) {
+            for (const item of toInsert) {
+                try {
+                    const created = await model.create(item.insertData);
+                    if (item.csvId !== undefined && idMap) {
+                        idMap.set(item.csvId, created.id);
+                    }
+                    state.inserted++;
+                    tableMetrics.inserted++;
+                } catch (rowErr) {
+                    state.failed++;
+                    tableMetrics.failed++;
+                    await writeErrorRow(errorStream, item.rawRow, rowErr.message || err.message, state, table);
+                }
+            }
+        }
+        return;
+    }
+
+    // For products, orders, and order_items: bulk insert without `id` and zip returned rows in order
+    try {
+        const payload = items.map((i) => i.insertData);
+        const streamResult = await model.createAll(payload);
+        const createdRows = [];
+        for await (const created of streamResult) {
+            createdRows.push(created);
+        }
+
+        for (let idx = 0; idx < items.length; idx++) {
+            const item = items[idx];
+            const created = createdRows[idx];
+            if (created && created.id !== undefined) {
+                if (item.csvId !== undefined && idMap) {
+                    idMap.set(item.csvId, created.id);
+                }
+                state.inserted++;
+                tableMetrics.inserted++;
+            } else {
+                state.failed++;
+                tableMetrics.failed++;
+                await writeErrorRow(errorStream, item.rawRow, "Row was not inserted", state, table);
+            }
+        }
+    } catch (batchErr) {
+        for (const item of items) {
+            try {
+                const created = await model.create(item.insertData);
+                if (item.csvId !== undefined && idMap) {
+                    idMap.set(item.csvId, created.id);
+                }
+                state.inserted++;
+                tableMetrics.inserted++;
+            } catch (rowErr) {
+                state.failed++;
+                tableMetrics.failed++;
+                await writeErrorRow(errorStream, item.rawRow, rowErr.message || batchErr.message, state, table);
+            }
+        }
+    }
+}
+
+/**
+ * Processes a full 5-file bundle in topological order using in-memory ID maps (csv_id -> db_id):
+ * 1. categories.csv -> categoryMap
+ * 2. products.csv   -> productMap (validating & remapping category_id)
+ * 3. customers.csv  -> customerMap
+ * 4. Pre-scan order_items.csv to compute expected total_amount = sum(quantity * unit_price) per CSV order_id
+ * 5. orders.csv     -> orderMap (validating & remapping customer_id AND verifying total_amount === sum(items))
+ * 6. order_items.csv -> (validating & remapping order_id and product_id)
+ */
+async function processBundleImport(bullJob) {
+    const { files } = bullJob.data;
+    const startTime = performance.now();
+    const errorCsvPath = path.join(ERROR_CSV_DIR, `${bullJob.id}_errors.csv`);
+    const errorStream = fs.createWriteStream(errorCsvPath);
+
+    const state = {
+        total_rows: 0,
+        inserted: 0,
+        updated_or_skipped: 0,
+        failed: 0,
+        errorHeaderWritten: false,
+        breakdown: {
+            categories: { total_rows: 0, inserted: 0, updated_or_skipped: 0, failed: 0 },
+            products: { total_rows: 0, inserted: 0, updated_or_skipped: 0, failed: 0 },
+            customers: { total_rows: 0, inserted: 0, updated_or_skipped: 0, failed: 0 },
+            orders: { total_rows: 0, inserted: 0, updated_or_skipped: 0, failed: 0 },
+            order_items: { total_rows: 0, inserted: 0, updated_or_skipped: 0, failed: 0 },
+        },
+    };
+
+    const categoryMap = new Map();
+    const productMap = new Map();
+    const customerMap = new Map();
+    const orderMap = new Map();
+
+    const reportProgress = async (currentStep) => {
+        await bullJob.updateProgress({
+            current_table: currentStep,
+            total_rows: state.total_rows,
+            inserted: state.inserted,
+            updated_or_skipped: state.updated_or_skipped,
+            failed: state.failed,
+            breakdown: state.breakdown,
+            time_taken_seconds: Number(((performance.now() - startTime) / 1000).toFixed(2)),
+        });
+    };
+
+    const importTableWithMapping = async (table, filePath, idMap, preRowCheck) => {
+        const model = MODEL_MAP[table]();
+        const tableMetrics = state.breakdown[table];
+        const seenCsvIds = new Set();
+        let batch = [];
+
+        const readStream = fs.createReadStream(filePath).pipe(csv());
+        for await (const rawRow of readStream) {
+            state.total_rows++;
+            tableMetrics.total_rows++;
+
+            const result = validateAndTransformRow(table, rawRow);
+            if (result.error) {
+                state.failed++;
+                tableMetrics.failed++;
+                await writeErrorRow(errorStream, rawRow, result.error, state, table);
+                continue;
+            }
+
+            if (result.csvId !== undefined) {
+                if (seenCsvIds.has(result.csvId)) {
+                    state.updated_or_skipped++;
+                    tableMetrics.updated_or_skipped++;
+                    await writeErrorRow(
+                        errorStream,
+                        rawRow,
+                        `Duplicate CSV id ${result.csvId} in ${table}.csv`,
+                        state,
+                        table
+                    );
+                    continue;
+                }
+                seenCsvIds.add(result.csvId);
+            }
+
+            // Strip `id` so PostgreSQL uses its autoincrement sequence
+            const { id: _unusedId, ...insertData } = result.data;
+
+            if (preRowCheck) {
+                const checkErr = preRowCheck(result.csvId, insertData);
+                if (checkErr) {
+                    state.failed++;
+                    tableMetrics.failed++;
+                    await writeErrorRow(errorStream, rawRow, checkErr, state, table);
+                    continue;
+                }
+            }
+
+            batch.push({
+                csvId: result.csvId,
+                insertData,
+                rawRow,
+            });
+
+            if (batch.length >= BATCH_SIZE) {
+                await processBundleBatch(table, model, batch, idMap, errorStream, state, tableMetrics);
+                batch = [];
+                await reportProgress(table);
+            }
+        }
+
+        if (batch.length > 0) {
+            await processBundleBatch(table, model, batch, idMap, errorStream, state, tableMetrics);
+            batch = [];
+            await reportProgress(table);
+        }
+    };
+
+    try {
+        // 1. Categories
+        await importTableWithMapping("categories", files.categories, categoryMap, null);
+
+        // 2. Products (remap category_id using categoryMap)
+        await importTableWithMapping("products", files.products, productMap, (_csvId, insertData) => {
+            const realCategoryId = categoryMap.get(insertData.category_id);
+            if (!realCategoryId) {
+                return `Referenced category_id ${insertData.category_id} does not exist or failed validation in categories.csv`;
+            }
+            insertData.category_id = realCategoryId;
+            return null;
+        });
+
+        // 3. Customers
+        await importTableWithMapping("customers", files.customers, customerMap, null);
+
+        // 4. Pre-scan order_items.csv to calculate sum(quantity * unit_price) per CSV order_id
+        // so we can validate orders.total_amount before inserting any orders!
+        const orderExpectedTotals = new Map();
+        const orderValidItemCounts = new Map();
+        const preScanStream = fs.createReadStream(files.order_items).pipe(csv());
+
+        for await (const rawItem of preScanStream) {
+            const parsed = validateAndTransformRow("order_items", rawItem);
+            if (parsed.error) {
+                continue;
+            }
+            const { order_id, product_id, quantity, unit_price } = parsed.data;
+            // Only count items whose product_id actually succeeded in products.csv
+            if (!productMap.has(product_id)) {
+                continue;
+            }
+            const lineTotal = quantity * unit_price;
+            orderExpectedTotals.set(order_id, (orderExpectedTotals.get(order_id) || 0) + lineTotal);
+            orderValidItemCounts.set(order_id, (orderValidItemCounts.get(order_id) || 0) + 1);
+        }
+
+        // 5. Orders (remap customer_id AND validate total_amount === sum(quantity * unit_price))
+        await importTableWithMapping("orders", files.orders, orderMap, (csvOrderId, insertData) => {
+            const realCustomerId = customerMap.get(insertData.customer_id);
+            if (!realCustomerId) {
+                return `Referenced customer_id ${insertData.customer_id} does not exist or failed validation in customers.csv`;
+            }
+            if (csvOrderId === undefined) {
+                return "Order row in bundle import must include a CSV 'id' to link with order_items.csv";
+            }
+
+            const validItemsCount = orderValidItemCounts.get(csvOrderId) || 0;
+            if (validItemsCount === 0) {
+                return `Order ${csvOrderId} has no valid order_items in order_items.csv`;
+            }
+
+            const expectedTotal = orderExpectedTotals.get(csvOrderId) || 0;
+            if (insertData.total_amount !== expectedTotal) {
+                return `Order total_amount mismatch: order has total_amount=${insertData.total_amount}, but sum(quantity * unit_price) of valid order_items is ${expectedTotal}`;
+            }
+
+            insertData.customer_id = realCustomerId;
+            return null;
+        });
+
+        // 6. Order Items (remap order_id and product_id)
+        await importTableWithMapping("order_items", files.order_items, null, (_csvId, insertData) => {
+            const realOrderId = orderMap.get(insertData.order_id);
+            if (!realOrderId) {
+                return `Referenced order_id ${insertData.order_id} was rejected or does not exist in orders.csv`;
+            }
+            const realProductId = productMap.get(insertData.product_id);
+            if (!realProductId) {
+                return `Referenced product_id ${insertData.product_id} was rejected or does not exist in products.csv`;
+            }
+            insertData.order_id = realOrderId;
+            insertData.product_id = realProductId;
+            return null;
+        });
+
+        await closeWriteStream(errorStream);
+
+        const time_taken_seconds = Number(((performance.now() - startTime) / 1000).toFixed(2));
+        const hasErrors = state.failed > 0 || state.updated_or_skipped > 0;
+        const error_csv_url = hasErrors ? `/import/jobs/${bullJob.id}/errors` : null;
+
+        if (!hasErrors && fs.existsSync(errorCsvPath)) {
+            fs.unlinkSync(errorCsvPath);
+        }
+
+        const finalSummary = {
+            total_rows: state.total_rows,
+            inserted: state.inserted,
+            updated_or_skipped: state.updated_or_skipped,
+            failed: state.failed,
+            breakdown: state.breakdown,
+            time_taken_seconds,
+            error_csv_url,
+        };
+
+        await bullJob.updateProgress(finalSummary);
+        return finalSummary;
+    } catch (err) {
+        await closeWriteStream(errorStream);
+        throw err;
+    } finally {
+        for (const key of Object.keys(files || {})) {
+            const fp = files[key];
+            if (fp && fs.existsSync(fp)) {
+                fs.unlink(fp, () => {});
+            }
+        }
     }
 }
 
@@ -269,6 +661,10 @@ export const importQueue = new Queue("csv-import-queue", {
 export const importWorker = new Worker(
     "csv-import-queue",
     async (bullJob) => {
+        if (bullJob.name === "csv-bundle-import" || bullJob.data?.files) {
+            return processBundleImport(bullJob);
+        }
+
         const { table, filePath } = bullJob.data;
         const startTime = performance.now();
         const errorCsvPath = path.join(ERROR_CSV_DIR, `${bullJob.id}_errors.csv`);
@@ -323,7 +719,7 @@ export const importWorker = new Worker(
                 batch = [];
             }
 
-            errorStream.end();
+            await closeWriteStream(errorStream);
 
             // Advance Postgres sequence if IDs were imported
             try {
@@ -356,11 +752,11 @@ export const importWorker = new Worker(
             await bullJob.updateProgress(finalSummary);
             return finalSummary;
         } catch (err) {
-            errorStream.end();
+            await closeWriteStream(errorStream);
             throw err;
         } finally {
             if (filePath && fs.existsSync(filePath)) {
-                fs.unlink(filePath, () => { });
+                fs.unlink(filePath, () => {});
             }
         }
     },
