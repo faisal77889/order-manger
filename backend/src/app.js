@@ -7,6 +7,7 @@ import customersRouter from "./routes/customers.router.js";
 import reportsRouter from "./routes/reports.router.js";
 import exportRouter from "./routes/export.router.js";
 import auditRouter from "./routes/audit.router.js";
+import usersRouter from "./routes/users.router.js";
 
 
 const app = express();
@@ -27,6 +28,7 @@ app.use("/customers", customersRouter);
 app.use("/reports", reportsRouter);
 app.use("/export", exportRouter);
 app.use("/audit-logs", auditRouter);
+app.use("/users", usersRouter);
 
 
 

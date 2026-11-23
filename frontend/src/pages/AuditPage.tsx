@@ -31,6 +31,9 @@ const COMMON_ACTIONS = [
   'order_status_changed',
   'order_deleted',
   'import_started',
+  'user_updated',
+  'user_role_changed',
+  'user_status_changed',
 ]
 
 function getActionBadgeStyle(action: string): string {

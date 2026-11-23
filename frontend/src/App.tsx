@@ -17,6 +17,7 @@ import ImportPage from './pages/ImportPage'
 import ExportPage from './pages/ExportPage'
 import ReportsPage from './pages/ReportsPage'
 import AuditPage from './pages/AuditPage'
+import UsersPage, { getStoredUser } from './pages/UsersPage'
 
 function ProtectedRoute() {
   const navigate = useNavigate()
@@ -35,10 +36,22 @@ function ProtectedRoute() {
   return <Outlet />
 }
 
+function AdminRoute() {
+  const user = getStoredUser()
+
+  if (!user || user.role !== 'admin') {
+    return <Navigate to="/orders" replace />
+  }
+
+  return <Outlet />
+}
+
 function Navbar() {
   const navigate = useNavigate()
   const location = useLocation()
   const token = localStorage.getItem('token')
+  const currentUser = getStoredUser()
+  const isAdmin = currentUser?.role === 'admin'
 
   const handleLogout = () => {
     localStorage.removeItem('token')
@@ -76,6 +89,11 @@ function Navbar() {
       <Link to="/audit" className={navLinkClass('/audit')}>
         Audit Logs
       </Link>
+      {token && isAdmin && (
+        <Link to="/users" className={navLinkClass('/users')}>
+          Users
+        </Link>
+      )}
 
       <div className="ml-auto flex items-center gap-3">
         {token ? (
@@ -129,6 +147,9 @@ function App() {
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/audit" element={<AuditPage />} />
               <Route path="/audit-logs" element={<AuditPage />} />
+              <Route element={<AdminRoute />}>
+                <Route path="/users" element={<UsersPage />} />
+              </Route>
             </Route>
             <Route path="*" element={<Navigate to="/orders" replace />} />
           </Routes>

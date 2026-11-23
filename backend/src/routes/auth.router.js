@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { body, validationResult } from "express-validator";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { db } from "../prisma/db.ts";
@@ -6,13 +7,85 @@ import { logAudit } from "../services/audit.service.js";
 
 const router = Router();
 
-router.post("/login", async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) {
+const ALLOWED_ROLES = ["admin", "viewer"];
+
+function handleValidationErrors(req, res, next) {
+    const result = validationResult(req);
+    if (!result.isEmpty()) {
+        const errors = result.array();
         return res.status(400).json({
-            message: "Fill email and password both"
+            error: errors[0].msg,
+            message: errors[0].msg,
+            errors,
         });
     }
+    next();
+}
+
+const loginValidator = [
+    body("email")
+        .exists({ values: "falsy" })
+        .withMessage("Fill email and password both")
+        .isString()
+        .withMessage("Email must be a string")
+        .trim()
+        .toLowerCase()
+        .isEmail()
+        .withMessage("Please enter a valid email address"),
+    body("password")
+        .exists({ values: "falsy" })
+        .withMessage("Fill email and password both")
+        .isString()
+        .withMessage("Password must be a string")
+        .trim()
+        .notEmpty()
+        .withMessage("Fill email and password both"),
+    handleValidationErrors,
+];
+
+const signupValidator = [
+    body("name")
+        .exists({ values: "falsy" })
+        .withMessage("Name, email, and password are required")
+        .isString()
+        .withMessage("Name must be a string")
+        .trim()
+        .notEmpty()
+        .withMessage("Name, email, and password are required")
+        .isLength({ min: 2, max: 100 })
+        .withMessage("Name must be between 2 and 100 characters"),
+    body("email")
+        .exists({ values: "falsy" })
+        .withMessage("Name, email, and password are required")
+        .isString()
+        .withMessage("Email must be a string")
+        .trim()
+        .toLowerCase()
+        .isEmail()
+        .withMessage("Please enter a valid email address"),
+    body("password")
+        .exists({ values: "falsy" })
+        .withMessage("Name, email, and password are required")
+        .isString()
+        .withMessage("Password must be a string")
+        .trim()
+        .notEmpty()
+        .withMessage("Name, email, and password are required")
+        .isLength({ min: 6 })
+        .withMessage("Password must be at least 6 characters long"),
+    body("role")
+        .optional({ values: "falsy" })
+        .isString()
+        .withMessage("Role must be a string")
+        .trim()
+        .toLowerCase()
+        .isIn(ALLOWED_ROLES)
+        .withMessage(`Invalid 'role'. Allowed values: ${ALLOWED_ROLES.join(", ")}.`),
+    handleValidationErrors,
+];
+
+router.post("/login", loginValidator, async (req, res) => {
+    const { email, password } = req.body;
 
     try {
         const user = await db.orm.public.AdminUser.where({ email }).first();
@@ -26,7 +99,8 @@ router.post("/login", async (req, res) => {
                 details: `Failed login attempt for unknown email '${email}'`,
             });
             return res.status(401).json({
-                message: "Invalid email or password"
+                error: "Invalid email or password",
+                message: "Invalid email or password",
             });
         }
 
@@ -40,7 +114,8 @@ router.post("/login", async (req, res) => {
                 details: `Failed login attempt: account '${user.email}' is disabled`,
             });
             return res.status(401).json({
-                message: "User account has been disabled"
+                error: "User account has been disabled",
+                message: "User account has been disabled",
             });
         }
 
@@ -65,7 +140,8 @@ router.post("/login", async (req, res) => {
                 details: `Failed login attempt: invalid password for '${user.email}'`,
             });
             return res.status(401).json({
-                message: "Invalid email or password"
+                error: "Invalid email or password",
+                message: "Invalid email or password",
             });
         }
 
@@ -91,33 +167,27 @@ router.post("/login", async (req, res) => {
                 id: user.id,
                 name: user.name,
                 email: user.email,
-                role: user.role
-            }
+                role: user.role,
+            },
         });
     } catch (error) {
         console.error("Login error:", error);
         return res.status(500).json({
-            message: "Internal server error"
+            error: "Internal server error",
+            message: "Internal server error",
         });
     }
 });
 
-
-
-
-router.post("/signup", async (req, res) => {
+router.post("/signup", signupValidator, async (req, res) => {
     const { email, password, name, role } = req.body;
-    if (!email || !password || !name) {
-        return res.status(400).json({
-            message: "Name, email, and password are required"
-        });
-    }
 
     try {
         const existingUser = await db.orm.public.AdminUser.where({ email }).first();
         if (existingUser) {
             return res.status(409).json({
-                message: "User with this email already exists"
+                error: "User with this email already exists",
+                message: "User with this email already exists",
             });
         }
 
@@ -128,7 +198,7 @@ router.post("/signup", async (req, res) => {
             email,
             name,
             password: hashedPassword,
-            role: assignedRole
+            role: assignedRole,
         });
 
         const token = jwt.sign(
@@ -144,13 +214,14 @@ router.post("/signup", async (req, res) => {
                 id: newUser.id,
                 name: newUser.name,
                 email: newUser.email,
-                role: newUser.role
-            }
+                role: newUser.role,
+            },
         });
     } catch (error) {
         console.error("Signup error:", error);
         return res.status(500).json({
-            message: "Internal server error"
+            error: "Internal server error",
+            message: "Internal server error",
         });
     }
 });

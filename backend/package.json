@@ -5,6 +5,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "dev": "node --watch src/app.js",
+    "start": "node src/app.js",
     "generate-data": "node scripts/generate_data.js --orders 200000 --out data",
     "test": "echo \"Error: no test specified\" && exit 1",
     "contract:emit": "prisma contract emit"
