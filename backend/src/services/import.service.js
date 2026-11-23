@@ -20,7 +20,7 @@ export const ALLOWED_TABLES = ["categories", "products", "customers", "orders", 
 const ALLOWED_STATUSES = new Set(["pending", "paid", "shipped", "cancelled"]);
 const BATCH_SIZE = 2500;
 
-export const MODEL_MAP = {
+const MODEL_MAP = {
     categories: () => db.orm.public.Category,
     products: () => db.orm.public.Product,
     customers: () => db.orm.public.Customer,
@@ -51,22 +51,14 @@ function closeWriteStream(stream) {
     });
 }
 
-async function writeErrorRow(errorStream, rawRow, reason, state, tableName = null) {
+async function writeErrorRow(errorStream, rawRow, reason, state, tableName) {
     if (!state.errorHeaderWritten) {
-        const headerCols = tableName
-            ? ["table", "row_id", "details", "error_reason"]
-            : [...Object.keys(rawRow), "error_reason"];
-        await writeCsvLine(errorStream, headerCols);
+        await writeCsvLine(errorStream, ["table", "row_id", "details", "error_reason"]);
         state.errorHeaderWritten = true;
     }
-    if (tableName) {
-        const rowId = rawRow.id ?? "";
-        const details = JSON.stringify(rawRow);
-        await writeCsvLine(errorStream, [tableName, rowId, details, reason]);
-    } else {
-        const cols = [...Object.keys(rawRow).map((k) => rawRow[k] ?? ""), reason];
-        await writeCsvLine(errorStream, cols);
-    }
+    const rowId = rawRow.id ?? "";
+    const details = JSON.stringify(rawRow);
+    await writeCsvLine(errorStream, [tableName, rowId, details, reason]);
 }
 
 function parseAmountToInt(raw) {
@@ -75,7 +67,7 @@ function parseAmountToInt(raw) {
     return Math.round(num);
 }
 
-export function validateAndTransformRow(table, row) {
+function validateAndTransformRow(table, row) {
     switch (table) {
         case "categories": {
             const name = (row.name || "").trim();
@@ -84,7 +76,7 @@ export function validateAndTransformRow(table, row) {
             if (row.id !== undefined && (!Number.isInteger(id) || id <= 0)) {
                 return { error: "Invalid id" };
             }
-            return { csvId: id, data: { ...(id ? { id } : {}), name } };
+            return { csvId: id, data: { name } };
         }
 
         case "products": {
@@ -103,7 +95,7 @@ export function validateAndTransformRow(table, row) {
             if (row.id !== undefined && (!Number.isInteger(id) || id <= 0)) {
                 return { error: "Invalid id" };
             }
-            return { csvId: id, data: { ...(id ? { id } : {}), category_id, name, price } };
+            return { csvId: id, data: { category_id, name, price } };
         }
 
         case "customers": {
@@ -129,7 +121,7 @@ export function validateAndTransformRow(table, row) {
             if (row.id !== undefined && (!Number.isInteger(id) || id <= 0)) {
                 return { error: "Invalid id" };
             }
-            return { csvId: id, data: { ...(id ? { id } : {}), name, email, city, createdAt } };
+            return { csvId: id, data: { name, email, city, createdAt } };
         }
 
         case "orders": {
@@ -157,7 +149,6 @@ export function validateAndTransformRow(table, row) {
             return {
                 csvId: id,
                 data: {
-                    ...(id ? { id } : {}),
                     customer_id,
                     status,
                     order_date,
@@ -191,7 +182,6 @@ export function validateAndTransformRow(table, row) {
             return {
                 csvId: id,
                 data: {
-                    ...(id ? { id } : {}),
                     order_id,
                     product_id,
                     quantity,
@@ -424,8 +414,7 @@ async function processBundleImport(bullJob) {
                 seenCsvIds.add(result.csvId);
             }
 
-            // Strip `id` so PostgreSQL uses its autoincrement sequence
-            const { id: _unusedId, ...insertData } = result.data;
+            const insertData = result.data;
 
             if (preRowCheck) {
                 const checkErr = preRowCheck(result.csvId, insertData);
@@ -569,78 +558,6 @@ async function processBundleImport(bullJob) {
     }
 }
 
-async function processBatch(table, model, items, errorStream, state) {
-    if (items.length === 0) return;
-
-    const payload = items.map((i) => i.data);
-
-    try {
-        const streamResult = await model.createAll(payload, { onConflict: "skip" });
-
-        const insertedKeys = new Set();
-        for await (const row of streamResult) {
-            if (row.id !== undefined) {
-                insertedKeys.add(`id:${row.id}`);
-            }
-            if (row.name !== undefined) {
-                insertedKeys.add(`name:${row.name}`);
-            }
-            if (row.email !== undefined) {
-                insertedKeys.add(`email:${row.email}`);
-            }
-        }
-
-        const skipped_transaction = [];
-        for (const item of items) {
-            let matched = false;
-            if (item.data.id !== undefined && insertedKeys.has(`id:${item.data.id}`)) {
-                matched = true;
-            } else if (item.data.name !== undefined && insertedKeys.has(`name:${item.data.name}`)) {
-                matched = true;
-            } else if (item.data.email !== undefined && insertedKeys.has(`email:${item.data.email}`)) {
-                matched = true;
-            }
-
-            if (matched) {
-                state.inserted++;
-            } else {
-                skipped_transaction.push(item);
-            }
-        }
-
-        for (const item of skipped_transaction) {
-            try {
-                await model.create(item.data);
-                state.inserted++;
-            } catch (err) {
-                const isDuplicate = err.message && err.message.includes("duplicate key value");
-                if (isDuplicate) {
-                    state.updated_or_skipped++;
-                } else {
-                    state.failed++;
-                }
-                await writeErrorRow(errorStream, item.rawRow, err.message, state);
-            }
-        }
-    } catch (batchErr) {
-        for (const item of items) {
-            try {
-                await model.create(item.data);
-                state.inserted++;
-            } catch (rowErr) {
-                const isDuplicate = rowErr.message && rowErr.message.includes("duplicate key value");
-                if (isDuplicate) {
-                    state.updated_or_skipped++;
-                } else {
-                    state.failed++;
-                }
-                await writeErrorRow(errorStream, item.rawRow, rowErr.message || batchErr.message, state);
-            }
-        }
-    }
-}
-
-export { redisConnection };
 
 export const importQueue = new Queue("csv-import-queue", {
     connection: redisConnection,
@@ -648,106 +565,7 @@ export const importQueue = new Queue("csv-import-queue", {
 
 export const importWorker = new Worker(
     "csv-import-queue",
-    async (bullJob) => {
-        if (bullJob.name === "csv-bundle-import" || bullJob.data?.files) {
-            return processBundleImport(bullJob);
-        }
-
-        const { table, filePath } = bullJob.data;
-        const startTime = performance.now();
-        const errorCsvPath = path.join(ERROR_CSV_DIR, `${bullJob.id}_errors.csv`);
-        const errorStream = fs.createWriteStream(errorCsvPath);
-
-        const state = {
-            total_rows: 0,
-            inserted: 0,
-            updated_or_skipped: 0,
-            failed: 0,
-            errorHeaderWritten: false,
-        };
-
-        const model = MODEL_MAP[table]();
-        let batch = [];
-
-        try {
-            const readStream = fs.createReadStream(filePath).pipe(csv());
-
-            for await (const rawRow of readStream) {
-                state.total_rows++;
-
-                const result = validateAndTransformRow(table, rawRow);
-
-                if (result.error) {
-                    state.failed++;
-                    await writeErrorRow(errorStream, rawRow, result.error, state);
-                    continue;
-                }
-
-                batch.push({
-                    data: result.data,
-                    rawRow,
-                });
-
-                if (batch.length >= BATCH_SIZE) {
-                    await processBatch(table, model, batch, errorStream, state);
-                    batch = [];
-
-                    await bullJob.updateProgress({
-                        total_rows: state.total_rows,
-                        inserted: state.inserted,
-                        updated_or_skipped: state.updated_or_skipped,
-                        failed: state.failed,
-                        time_taken_seconds: Number(((performance.now() - startTime) / 1000).toFixed(2)),
-                    });
-                }
-            }
-
-            if (batch.length > 0) {
-                await processBatch(table, model, batch, errorStream, state);
-                batch = [];
-            }
-
-            await closeWriteStream(errorStream);
-
-            // Advance Postgres sequence if IDs were imported
-            try {
-                await db.execute(
-                    db.raw.sql`SELECT setval(pg_get_serial_sequence(${table}, 'id'), COALESCE((SELECT MAX(id) FROM ${db.raw.sql([table])}), 1), true)`
-                        .affectedCount()
-                        .build()
-                );
-            } catch {
-                // Sequence update is best-effort
-            }
-
-            const time_taken_seconds = Number(((performance.now() - startTime) / 1000).toFixed(2));
-            const hasErrors = state.failed > 0 || state.updated_or_skipped > 0;
-            const error_csv_url = hasErrors ? `/import/jobs/${bullJob.id}/errors` : null;
-
-            if (!hasErrors && fs.existsSync(errorCsvPath)) {
-                fs.unlinkSync(errorCsvPath);
-            }
-
-            const finalSummary = {
-                total_rows: state.total_rows,
-                inserted: state.inserted,
-                updated_or_skipped: state.updated_or_skipped,
-                failed: state.failed,
-                time_taken_seconds,
-                error_csv_url,
-            };
-
-            await bullJob.updateProgress(finalSummary);
-            return finalSummary;
-        } catch (err) {
-            await closeWriteStream(errorStream);
-            throw err;
-        } finally {
-            if (filePath && fs.existsSync(filePath)) {
-                fs.unlink(filePath, () => {});
-            }
-        }
-    },
+    async (bullJob) => processBundleImport(bullJob),
     {
         connection: redisConnection,
         concurrency: 1,

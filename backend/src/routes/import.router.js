@@ -90,28 +90,6 @@ const uploadBundleMiddleware = (req, res, next) => {
     });
 };
 
-const uploadCsvMiddleware = (req, res, next) => {
-    upload.single("file")(req, res, (err) => {
-        if (err instanceof multer.MulterError) {
-            if (err.code === "LIMIT_FILE_SIZE") {
-                return res.status(413).json({
-                    error: "File too large. Maximum allowed size is 100 MB.",
-                });
-            }
-            return res.status(400).json({ error: `Upload error: ${err.message}` });
-        }
-        if (err) {
-            return res.status(err.statusCode || 400).json({ error: err.message });
-        }
-
-        if (!req.file) {
-            return res.status(400).json({
-                error: 'No CSV file uploaded. Please upload a .csv file in form-data field "file".',
-            });
-        }
-        next();
-    });
-};
 
 const handleBulkBundleImport = async (req, res) => {
     const files = {
@@ -161,8 +139,6 @@ const handleBulkBundleImport = async (req, res) => {
 };
 
 router.post("/bulk", requireAuth, requireAdmin, uploadBundleMiddleware, handleBulkBundleImport);
-router.post("/bundle", requireAuth, requireAdmin, uploadBundleMiddleware, handleBulkBundleImport);
-router.post("/", requireAuth, requireAdmin, uploadBundleMiddleware, handleBulkBundleImport);
 
 router.get("/jobs/:job_id", async (req, res) => {
     try {
@@ -229,52 +205,6 @@ router.get("/jobs/:job_id/errors", async (req, res) => {
     }
 });
 
-router.post("/:table", requireAuth, requireAdmin, uploadCsvMiddleware, async (req, res) => {
-    const { table } = req.params;
 
-    if (!ALLOWED_TABLES.includes(table)) {
-        if (req.file?.path && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-        }
-        return res.status(400).json({
-            error: `Invalid table "${table}". Allowed tables: ${ALLOWED_TABLES.join(", ")} (or use POST /import/bulk with all 5 files)`,
-        });
-    }
-
-    try {
-        const jobId = crypto.randomUUID();
-        await importQueue.add(
-            "csv-import",
-            {
-                table,
-                filePath: req.file.path,
-            },
-            {
-                jobId,
-                removeOnComplete: false,
-                removeOnFail: false,
-            }
-        );
-
-        await logAudit({
-            user_id: req.user?.id ?? null,
-            actor_email: req.user?.email ?? null,
-            action: "import_started",
-            entity: table,
-            entity_id: jobId,
-            details: `Bulk CSV import started for table '${table}' (job_id: ${jobId})`,
-        });
-
-        return res.status(202).json({
-            message: `Import job queued for ${table}`,
-            job_id: jobId,
-            status: "running",
-            status_url: `/import/jobs/${jobId}`,
-        });
-    } catch (err) {
-        console.error("Failed to enqueue BullMQ import job:", err);
-        return res.status(500).json({ error: "Failed to queue import job." });
-    }
-});
 
 export default router;
