@@ -24,7 +24,8 @@
     "express-validator": "^7.3.2",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.5.0"
+    "multer": "^2.5.0",
+    "order-manager": "file:.."
   },
   "devDependencies": {
     "@prisma/cli-engine": "^0.10.0",

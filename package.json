@@ -1,0 +1,11 @@
+{
+  "name": "order-manager",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "setup": "npm --prefix backend install && cd backend && npx prisma migrate dev && npm run contract:emit && cd ../frontend && npm install",
+    "dev:backend": "node backend/src/app.js",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "generate-data": "npm --prefix backend run generate-data"
+  }
+}
